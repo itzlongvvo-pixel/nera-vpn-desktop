@@ -1,0 +1,34 @@
+# Node / Vite / Svelte
+node_modules/
+dist/
+.vite/
+.vscode/
+
+# Tauri / Rust
+src-tauri/target/
+src-tauri/tauri.conf.json.bak
+src-tauri/*.log
+
+# Build artifacts
+*.msi
+*.exe
+*.dmg
+*.AppImage
+*.deb
+*.rpm
+*.pkg
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+*.log
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# Env / secrets (if you add them later)
+.env
+.env.*
