@@ -7,18 +7,19 @@
     "distDir": "../dist"
   },
   "package": {
-    "productName": "Nera VPN",
+    "productName": "Nera VPN™",
     "version": "1.0.0"
   },
   "tauri": {
     "windows": [
       {
-        "title": "Nera VPN",
+        "title": "Nera VPN™",
         "width": 1120,
         "height": 680,
         "resizable": true,
         "fullscreen": false,
-        "decorations": true
+        "decorations": true,
+        "theme": "Dark"
       }
     ],
     "systemTray": {
