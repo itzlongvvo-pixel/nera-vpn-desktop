@@ -10,11 +10,14 @@
 <script>
   import { onMount } from "svelte";
   import { getVersion } from "@tauri-apps/api/app";
-  import { appWindow } from "@tauri-apps/api/window";
-  import { invoke } from "@tauri-apps/api/tauri"; // Ensure invoke is imported
+  import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
+  import { invoke } from "@tauri-apps/api/core"; // Ensure invoke is imported
+  import { listen } from "@tauri-apps/api/event";
   import Protection from "./components/Protection.svelte"; // Ensure correct path
+  import SignUp from "./components/SignUp.svelte";
   import Globe from "./lib/Globe.svelte"; // Import Globe component
   import { getPublicIPAndLocation } from "./lib/ipLocation";
+  const appWindow = getCurrentWebviewWindow();
 
   const SETTINGS_KEY = "nera-vpn-settings";
 
@@ -45,7 +48,13 @@
   // Session controls (persisted in local storage, except killswitch/server)
   let launchOnStartup = true;
   let autoConnectWifi = true;
+  let showLocation = true; // New state
+
   let startMinimized = false;
+  let currentTheme = "dark";
+
+  $: document.body.className =
+    currentTheme === "light" ? "" : `theme-${currentTheme}`;
 
   let appVersion = "";
   let importMessage = "";
@@ -62,6 +71,7 @@
   let regStep = 0; // 0: Idle, 1: Generating/Registering, 2: Success, 3: Error
   let regError = "";
   let regSuccessMsg = "";
+  let userPublicKey = "";
 
   // About Modal State
   let showAboutModal = false;
@@ -69,7 +79,13 @@
   // Traffic Bar Graph Data
   // Traffic Bar Graph Data
   let trafficValues = new Array(20).fill(5); // 20 bars
-  let trafficInterval;
+  let unlistenTraffic;
+  let downloadSpeed = "0 B/s";
+  let uploadSpeed = "0 B/s";
+  let pingValue = "—";
+  let peakSpeed = "0 B/s";
+  let currentMaxScale = 1024 * 1024; // Start at 1MB/s
+  let scaleLabel = "1.0 MB/s";
 
   $: if (connected) {
     startTraffic();
@@ -81,21 +97,66 @@
     checkIp(false, true);
   }
 
-  function startTraffic() {
+  async function startTraffic() {
     stopTraffic();
-    trafficInterval = setInterval(() => {
-      // Shift right, unshift new random value (flow Left -> Right)
-      const val = Math.floor(Math.random() * 80) + 15; // 15% to 95% height
+    unlistenTraffic = await listen("traffic-update", (event) => {
+      const { download, upload, ping } = event.payload;
+
+      // Update Text
+      downloadSpeed = formatSpeed(download);
+      uploadSpeed = formatSpeed(upload);
+      if (ping) pingValue = ping;
+
+      // Update Graph (Dynamic Scaling)
+      // 1. Zoom Out (Instant)
+      if (download > currentMaxScale) {
+        currentMaxScale = download;
+      } else {
+        // 2. Zoom In (Decay 5% per tick, floor at 1MB)
+        let newScale = currentMaxScale * 0.95;
+        if (newScale < 1024 * 1024) newScale = 1024 * 1024;
+        currentMaxScale = newScale;
+      }
+      scaleLabel = formatSpeed(currentMaxScale);
+
+      let pct = (download / currentMaxScale) * 100;
+
+      if (pct > 100) pct = 100;
+      if (pct < 2) pct = 2; // Tiny floor so line exists
+
       trafficValues = [
-        val,
+        pct,
         ...trafficValues.slice(0, trafficValues.length - 1),
       ];
-    }, 600);
+
+      // Calculate Peak for UI
+      // Crude approximation since we only store %, but we can track max bytes seen
+      if (download > maxDownloadBytes) {
+        maxDownloadBytes = download;
+        peakSpeed = formatSpeed(maxDownloadBytes);
+      }
+    });
   }
 
+  let maxDownloadBytes = 0;
+
   function stopTraffic() {
-    if (trafficInterval) clearInterval(trafficInterval);
-    trafficValues = new Array(20).fill(5); // Idle state
+    if (unlistenTraffic) {
+      unlistenTraffic();
+      unlistenTraffic = null;
+    }
+    trafficValues = new Array(20).fill(5);
+    downloadSpeed = "0 B/s";
+    uploadSpeed = "0 B/s";
+    pingValue = "—";
+  }
+
+  function formatSpeed(bytes) {
+    if (bytes < 1024) return bytes + " B/s";
+    const k = bytes / 1024;
+    if (k < 1024) return k.toFixed(1) + " KB/s";
+    const m = k / 1024;
+    return m.toFixed(1) + " MB/s";
   }
 
   // Generate a smooth SVG path from trafficValues
@@ -155,8 +216,19 @@
         launchOnStartup = data.launchOnStartup;
       if (typeof data.autoConnectWifi === "boolean")
         autoConnectWifi = data.autoConnectWifi;
+      if (typeof data.showLocation === "boolean")
+        showLocation = data.showLocation;
       if (typeof data.startMinimized === "boolean")
         startMinimized = data.startMinimized;
+      if (data.theme) {
+        // Migration: map "default" to "light", "space"/"nebula" to "dark" maybe?
+        if (data.theme === "default") currentTheme = "light";
+        else if (data.theme === "nebula")
+          currentTheme = "space"; // map old nebula to space
+        else currentTheme = data.theme;
+      } else {
+        currentTheme = "dark";
+      }
 
       // Note: selectedRouteKey is now managed by backend (get_selected_server)
 
@@ -173,7 +245,10 @@
         // selectedRouteKey: ref removed (backend)
         launchOnStartup,
         autoConnectWifi,
+        showLocation,
+
         startMinimized,
+        theme: currentTheme,
       };
       localStorage.setItem(SETTINGS_KEY, JSON.stringify(data));
     } catch (e) {
@@ -248,6 +323,7 @@
         startRegistration();
       } else {
         console.log("User key found:", key);
+        userPublicKey = key;
       }
     } catch (e) {
       console.error("Failed to check user status", e);
@@ -265,13 +341,8 @@
 
       const msg = await invoke("register_user_key");
       regSuccessMsg = msg;
+      userPublicKey = await invoke("get_user_status");
       regStep = 2;
-
-      // Close after success
-      setTimeout(() => {
-        showRegistrationModal = false;
-        regStep = 0;
-      }, 2000);
     } catch (e) {
       console.error("Registration failed", e);
       regError = String(e);
@@ -353,6 +424,7 @@
 
     if (startMinimized) {
       try {
+        console.log("Start Minimized is TRUE. Hiding window now.");
         await appWindow.hide();
       } catch (e) {
         console.error("Failed to hide on launch", e);
@@ -416,7 +488,7 @@
           >{ipData ? ipData.ip : ipChecking ? "Checking..." : "---"}</span
         >
       </div>
-      {#if ipData && ipData.country}
+      {#if showLocation && ipData && ipData.country}
         <div class="ip-row location-row">
           <span class="location-icon">📍</span>
           <span class="location-value"
@@ -505,13 +577,26 @@
         </div>
       </label>
 
-      <!-- Launch on Startup -->
+      <!-- Auto-Connect -->
       <label class="control-row">
-        <span>Launch on Startup</span>
+        <span>Auto-Connect</span>
         <div class="toggle-wrap">
           <input
             type="checkbox"
-            bind:checked={launchOnStartup}
+            bind:checked={autoConnectWifi}
+            on:change={saveSettings}
+          />
+          <span class="toggle-track"><span class="toggle-thumb"></span></span>
+        </div>
+      </label>
+
+      <!-- Show Location -->
+      <label class="control-row">
+        <span>Show Location</span>
+        <div class="toggle-wrap">
+          <input
+            type="checkbox"
+            bind:checked={showLocation}
             on:change={saveSettings}
           />
           <span class="toggle-track"><span class="toggle-thumb"></span></span>
@@ -531,16 +616,32 @@
         </div>
       </label>
 
-      <!-- Auto-Connect -->
+      <!-- Launch on Startup -->
       <label class="control-row">
-        <span>Auto-Connect</span>
+        <span>Launch on Startup</span>
         <div class="toggle-wrap">
           <input
             type="checkbox"
-            bind:checked={autoConnectWifi}
+            bind:checked={launchOnStartup}
             on:change={saveSettings}
           />
           <span class="toggle-track"><span class="toggle-thumb"></span></span>
+        </div>
+      </label>
+
+      <!-- Theme Switcher -->
+      <label class="control-row">
+        <span>Theme</span>
+        <div class="select-wrap">
+          <select
+            bind:value={currentTheme}
+            on:change={saveSettings}
+            class="theme-select"
+          >
+            <option value="light">Light</option>
+            <option value="dark">Dark</option>
+            <option value="space">Space</option>
+          </select>
         </div>
       </label>
     </div>
@@ -595,20 +696,27 @@
     <div class="stats-grid">
       <div class="stat-item">
         <span class="label">DL</span>
-        <span class="val">{connected ? "1.8 GB" : "—"}</span>
+        <span class="val">{connected ? downloadSpeed : "—"}</span>
       </div>
       <div class="stat-item">
         <span class="label">UL</span>
-        <span class="val">{connected ? "2.1 GB" : "—"}</span>
+        <span class="val">{connected ? uploadSpeed : "—"}</span>
       </div>
       <div class="stat-item">
         <span class="label">Ping</span>
-        <span class="val">{connected ? "18 ms" : "—"}</span>
+        <span class="val">{connected ? pingValue : "—"}</span>
       </div>
     </div>
+  </div>
 
-    <!-- Live Traffic Area Graph -->
+  <!-- Bottom Center: Graph -->
+  <div class="hud-panel bottom-center-graph">
     <div class="traffic-graph">
+      <div class="cyber-grid"></div>
+
+      <!-- Peak Label (hover) -->
+      <div class="peak-label">Peak: {peakSpeed}</div>
+
       <svg viewBox="0 0 100 100" preserveAspectRatio="none" class="traffic-svg">
         <defs>
           <linearGradient id="trafficGradient" x1="0" x2="0" y1="0" y2="1">
@@ -633,6 +741,7 @@
           vector-effect="non-scaling-stroke"
           stroke-linecap="round"
           stroke-linejoin="round"
+          class="traffic-line"
         />
       </svg>
     </div>
@@ -663,9 +772,13 @@
           <p>Generating unique encryption keys...</p>
           <p class="sub-text">Registering with secure network...</p>
         {:else if regStep === 2}
-          <div class="icon-success">✓</div>
-          <p>Setup Complete</p>
-          <p class="sub-text">{regSuccessMsg}</p>
+          <SignUp
+            publicKey={userPublicKey}
+            onSignupSuccess={() => {
+              showRegistrationModal = false;
+              regStep = 0;
+            }}
+          />
         {:else if regStep === 3}
           <div class="icon-error">✕</div>
           <p>Registration Failed</p>
@@ -704,13 +817,69 @@
   :global(body) {
     margin: 0;
     padding: 0;
-    background: #020617;
+    /* Theme Variables */
+    --bg-color: #020617;
+    --panel-bg: rgba(2, 6, 23, 0.3);
+    --border-color: rgba(148, 163, 184, 0.2);
+    --text-color: #e2e8f0;
+    --text-muted: #94a3b8;
+    --accent-cyan: #22d3ee;
+    --accent-green: #22c55e;
+    --card-hover-bg: rgba(2, 6, 23, 0.3);
+
+    background: var(--bg-image, var(--bg-color)) no-repeat center center fixed;
+    background-size: cover;
     font-family:
       system-ui,
       -apple-system,
       sans-serif;
-    color: #e2e8f0;
+    color: var(--text-color);
     overflow: hidden;
+    transition:
+      background 0.3s,
+      color 0.3s;
+  }
+
+  :global(body.theme-dark) {
+    --bg-color: #000000;
+    --panel-bg: rgba(20, 20, 20, 0.85);
+    --border-color: rgba(60, 60, 60, 0.6);
+    --text-color: #ffffff;
+    --text-muted: #a3a3a3;
+    --card-hover-bg: rgba(40, 40, 40, 0.8);
+    /* Accents stay vibrant */
+  }
+
+  :global(body.theme-space) {
+    /* Image Background */
+    --bg-color: #000000;
+    --bg-image: url("/src/assets/space-bg.png");
+
+    /* Glassy Panels */
+    --panel-bg: rgba(10, 10, 15, 0.4);
+    --border-color: rgba(100, 100, 255, 0.15);
+
+    /* Text & Accents - Crisp White/Cyan */
+    --text-color: #f8fafc;
+    --text-muted: #cbd5e1;
+    --accent-cyan: #67e8f9;
+    --accent-green: #4ade80;
+  }
+
+  :global(body.theme-galaxy) {
+    /* Image Background */
+    --bg-color: #0d0d15;
+    --bg-image: url("/src/assets/galaxy-bg.png");
+
+    /* Glassy Panels */
+    --panel-bg: rgba(20, 15, 25, 0.4);
+    --border-color: rgba(255, 100, 200, 0.15);
+
+    /* Text & Accents - Pink/Purple */
+    --text-color: #fdf2f8;
+    --text-muted: #e2e8f0;
+    --accent-cyan: #f472b6;
+    --accent-green: #c084fc;
   }
 
   main {
@@ -753,20 +922,23 @@
   /* HUD Panels */
   .hud-panel {
     position: absolute;
-    background: rgba(2, 6, 23, 0.3);
+    background: var(--panel-bg);
     backdrop-filter: blur(20px);
-    border: 1px solid rgba(148, 163, 184, 0.2);
+    border: 1px solid var(--border-color);
     border-radius: 20px;
     padding: 1.2rem;
     z-index: 10;
     box-shadow: 0 4px 30px rgba(0, 0, 0, 0.5);
+    transition:
+      background 0.3s,
+      border-color 0.3s;
   }
 
   /* .panel-header moved to local scope to handle icon layout */
 
   .divider {
     height: 1px;
-    background: rgba(148, 163, 184, 0.15);
+    background: var(--border-color);
     margin: 1rem 0;
   }
 
@@ -790,13 +962,13 @@
   .ip-label {
     font-size: 0.65rem;
     font-weight: 700;
-    color: #64748b;
+    color: var(--text-muted);
     letter-spacing: 0.05em;
   }
   .ip-value {
     font-family: monospace;
     font-size: 0.95rem;
-    color: #22d3ee; /* Cyan */
+    color: var(--accent-cyan);
     font-weight: 600;
   }
   .location-row {
@@ -872,8 +1044,9 @@
     max-height: 500px; /* Expand to fit content */
 
     /* Expanded states */
-    background: rgba(2, 6, 23, 0.3);
-    border-color: rgba(148, 163, 184, 0.2);
+    /* Expanded states */
+    background: var(--panel-bg);
+    border-color: var(--border-color);
     box-shadow: 0 4px 30px rgba(0, 0, 0, 0.5);
     backdrop-filter: blur(20px);
   }
@@ -1057,6 +1230,19 @@
     width: 0;
     height: 0;
   }
+  .theme-select {
+    width: 100%;
+    background: transparent;
+    color: var(--text-color);
+    border: none;
+    font-size: 0.8rem;
+    outline: none;
+    cursor: pointer;
+  }
+  .theme-select option {
+    background: #020617; /* Always dark bg for dropdown */
+    color: #e2e8f0;
+  }
   .toggle-track {
     position: absolute;
     inset: 0;
@@ -1070,7 +1256,7 @@
     width: 16px;
     left: 2px;
     bottom: 2px;
-    background: #64748b;
+    background: var(--text-muted);
     border-radius: 50%;
     transition: 0.3s;
   }
@@ -1080,7 +1266,7 @@
   }
   input:checked + .toggle-track .toggle-thumb {
     transform: translateX(16px);
-    background: #22c55e;
+    background: var(--accent-green);
   }
   .action-btn {
     width: 100%;
@@ -1088,7 +1274,7 @@
     border-radius: 8px;
     border: 1px solid rgba(255, 255, 255, 0.1);
     background: rgba(255, 255, 255, 0.05);
-    color: #cbd5e1;
+    color: var(--text-muted);
     cursor: pointer;
     font-size: 0.8rem;
     transition: background 0.2s;
@@ -1098,7 +1284,7 @@
   }
   .status-msg {
     font-size: 0.7rem;
-    color: #94a3b8;
+    color: var(--text-muted);
     text-align: center;
     margin-top: 0.5rem;
   }
@@ -1107,12 +1293,29 @@
   .bottom-left {
     bottom: 24px;
     left: 24px;
-    width: 220px;
+    width: auto; /* Shrink to fit stats */
+    min-width: 140px;
   }
   .stats-grid {
     display: flex;
-    justify-content: space-between;
-    margin-bottom: 1rem;
+    gap: 1.5rem; /* Wider spacing */
+    margin-bottom: 0; /* No graph below */
+  }
+
+  /* Bottom Center: Graph */
+  .bottom-center-graph {
+    bottom: 24px;
+    left: 50%;
+    transform: translateX(-50%);
+    width: 400px;
+    height: 80px;
+    padding: 0; /* Flush graph */
+    overflow: hidden;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border: 1px solid rgba(148, 163, 184, 0.3);
+    box-shadow: 0 0 20px rgba(0, 0, 0, 0.6);
   }
   .stat-item {
     display: flex;
@@ -1130,17 +1333,98 @@
   }
   .traffic-graph {
     width: 100%;
-    height: 40px; /* Reduced height */
-    margin-bottom: 0.2rem; /* Reduced margin */
+    height: 100%; /* Fill panel */
+    margin-bottom: 0;
     overflow: hidden;
+    position: relative;
+    border-radius: 0;
+    background: rgba(0, 0, 0, 0.3);
   }
+  .cyber-grid {
+    position: absolute;
+    inset: 0;
+    /* Cyber grid pattern */
+    background-image: linear-gradient(
+        rgba(34, 197, 94, 0.05) 1px,
+        transparent 1px
+      ),
+      linear-gradient(90deg, rgba(34, 197, 94, 0.05) 1px, transparent 1px);
+    background-size: 20px 20px;
+    background-position: 0 0;
+    transition: opacity 0.3s;
+    animation: gridScroll 10s linear infinite;
+    z-index: 0;
+    mask-image: linear-gradient(
+      to bottom,
+      transparent,
+      black 20%,
+      black 80%,
+      transparent
+    );
+    -webkit-mask-image: linear-gradient(
+      to bottom,
+      transparent,
+      black 20%,
+      black 80%,
+      transparent
+    );
+  }
+  @keyframes gridScroll {
+    from {
+      background-position: 0 0;
+    }
+    to {
+      background-position: -20px 0;
+    }
+  }
+
   .traffic-svg {
     width: 100%;
     height: 100%;
-    overflow: visible;
+    overflow: visible; /* Allow glow to spill */
+    position: relative;
+    z-index: 1;
   }
   .traffic-fill {
     transition: d 0.6s ease;
+    filter: drop-shadow(0 0 4px rgba(34, 197, 94, 0.2));
+  }
+  .traffic-line {
+    transition: d 0.6s ease;
+    filter: drop-shadow(0 0 5px #22c55e);
+    animation: pulseGlow 3s ease-in-out infinite;
+  }
+  @keyframes pulseGlow {
+    0%,
+    100% {
+      filter: drop-shadow(0 0 5px #22c55e);
+      stroke: #22c55e;
+    }
+    50% {
+      filter: drop-shadow(0 0 10px #22c55e);
+      stroke: #4ade80;
+    }
+  }
+
+  .peak-label {
+    position: absolute;
+    top: 4px;
+    right: 6px;
+    font-size: 0.65rem;
+    color: #86efac;
+    background: rgba(6, 78, 59, 0.8);
+    padding: 2px 6px;
+    border-radius: 4px;
+    z-index: 5;
+    opacity: 0;
+    transform: translateY(-5px);
+    transition: all 0.2s ease;
+    pointer-events: none;
+    border: 1px solid rgba(34, 197, 94, 0.3);
+  }
+  .traffic-graph:hover .peak-label {
+    opacity: 1;
+    transform: translateY(0);
   }
   .ip-result {
     font-size: 0.75rem;
@@ -1235,8 +1519,9 @@
   .ring-button.on {
     background: radial-gradient(
       circle,
-      rgba(34, 197, 94, 0.4) 0%,
-      rgba(6, 78, 59, 0.8) 100%
+      var(--accent-green) 0%,
+      /* Use var but opacity is tricky here, hardcode OK or use css var with rgb */
+        rgba(6, 78, 59, 0.8) 100%
     );
     border: 2px solid #86efac;
     box-shadow:

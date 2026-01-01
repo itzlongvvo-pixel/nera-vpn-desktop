@@ -20,7 +20,7 @@ const REQUEST_TIMEOUT_MS = 1500;
 // Phase 1: Plain-text IP Providers (Reliable, unlimited)
 const IP_PROVIDERS = [
     "https://api.ipify.org?format=text",
-    "https://icanhazip.com",
+    "https://4.icanhazip.com", // Forced IPv4
     "https://ipinfo.io/ip",
     "https://checkip.amazonaws.com",
     "https://api.my-ip.io/ip",
@@ -143,8 +143,8 @@ export async function getPublicIPAndLocation(bypassCache = false) {
         try {
             const text = await fetchWithTimeout(url, false);
             const cleanIp = text.trim();
-            if (cleanIp && cleanIp.length > 6) {
-                // Basic length check
+            // Basic length check + IPv4 check (no colons)
+            if (cleanIp && cleanIp.length > 6 && !cleanIp.includes(":")) {
                 detectedIp = cleanIp;
                 break; // Success
             }

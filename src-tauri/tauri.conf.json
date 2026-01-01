@@ -3,14 +3,22 @@
   "build": {
     "beforeDevCommand": "npm run dev",
     "beforeBuildCommand": "npm run build",
-    "devPath": "http://localhost:1420",
-    "distDir": "../dist"
+    "frontendDist": "../dist",
+    "devUrl": "http://localhost:1420"
   },
-  "package": {
-    "productName": "Nera VPN™",
-    "version": "1.0.0"
+  "bundle": {
+    "active": true,
+    "icon": [
+      "icons/icon.ico"
+    ],
+    "targets": "all"
   },
-  "tauri": {
+  "productName": "Nera VPN™",
+  "mainBinaryName": "Nera VPN™",
+  "version": "0.1.0",
+  "identifier": "com.neravpn.app",
+  "plugins": {},
+  "app": {
     "windows": [
       {
         "title": "Nera VPN™",
@@ -19,34 +27,16 @@
         "resizable": true,
         "fullscreen": false,
         "decorations": true,
-        "theme": "Dark"
+        "theme": "Dark",
+        "useHttpsScheme": true
       }
     ],
-    "systemTray": {
-      "iconPath": "icons/icon.ico",
-      "iconAsTemplate": false
-    },
-    "bundle": {
-      "active": true,
-      "identifier": "com.nera.vpn",
-      "targets": "all",
-      "icon": [
-        "icons/icon.ico"
-      ]
-    },
     "security": {
       "csp": null
     },
-    "allowlist": {
-      "all": false,
-      "shell": {
-        "all": false,
-        "open": true
-      },
-      "dialog": {
-        "all": false,
-        "open": true
-      }
+    "trayIcon": {
+      "iconPath": "icons/icon.ico",
+      "iconAsTemplate": false
     }
   }
 }

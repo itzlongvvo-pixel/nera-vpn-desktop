@@ -8,5 +8,5 @@
   The source code and binaries are protected by copyright law and international treaties.
 */
 fn main() {
-  tauri_build::build()
+    tauri_build::build()
 }

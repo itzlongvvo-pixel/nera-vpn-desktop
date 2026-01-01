@@ -8,7 +8,7 @@
   The source code and binaries are protected by copyright law and international treaties.
 -->
 <script>
-  import { invoke } from "@tauri-apps/api/tauri";
+  import { invoke } from "@tauri-apps/api/core";
   import { listen } from "@tauri-apps/api/event";
   import { onMount, onDestroy } from "svelte";
 
