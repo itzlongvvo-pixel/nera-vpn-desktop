@@ -43,7 +43,7 @@ const WIREGUARD_EXE: &str = r"C:\Program Files\WireGuard\wireguard.exe";
 const TUNNEL_NAME: &str = "nera";
 
 const TOKYO_CONFIG_TEMPLATE: &str = r#"[Interface]
-PrivateKey = {{PRIVATE_KEY}}
+PrivateKey = {{PRIVATE_KEY}}/32
 Address = {{ADDRESS}}
 DNS = 1.1.1.1
 
