@@ -41,8 +41,14 @@
                 successMessage = `Account created! IP: ${result.ip}`;
             }
 
+            // --- UPDATE: Pass 'rememberMe' to backend ---
+            // This ensures the backend knows whether to save keys to disk or not.
+            await invoke("complete_registration", {
+                ip: result.ip,
+                remember: rememberMe,
+            });
+
             // --- THE CRITICAL FIX ---
-            // We do NOT manually change screens.
             // We tell the Security Vault to re-verify the user.
             await syncAuthState();
             // ------------------------
@@ -100,15 +106,15 @@
                 </div>
             {/if}
 
-            <div class="options-row">
-                <label class="remember-me">
-                    <input type="checkbox" bind:checked={rememberMe} />
-                    <span>Remember me</span>
-                </label>
-                {#if mode === "login"}
+            {#if mode === "login"}
+                <div class="options-row">
+                    <label class="remember-me">
+                        <input type="checkbox" bind:checked={rememberMe} />
+                        <span>Remember me</span>
+                    </label>
                     <a href="#" class="forgot-pass">Forgot Password?</a>
-                {/if}
-            </div>
+                </div>
+            {/if}
 
             <button
                 class="submit-btn"

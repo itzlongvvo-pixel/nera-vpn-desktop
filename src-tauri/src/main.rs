@@ -95,6 +95,8 @@ struct AppSettings {
     public_key: String,
     #[serde(default)]
     device_ip: String,
+    #[serde(default)]       // <--- ADD THIS
+    remember_me: bool,      // <--- ADD THIS
 }
 
 fn default_server() -> String {
@@ -765,9 +767,10 @@ fn get_user_status() -> Option<String> {
 }
 
 #[tauri::command]
-fn complete_registration(ip: String) -> Result<(), String> {
+fn complete_registration(ip: String, remember: bool) -> Result<(), String> {
     let mut settings = load_settings();
     settings.device_ip = ip;
+    settings.remember_me = remember; // <--- Save the user's preference
     save_settings(&settings);
     Ok(())
 }
@@ -775,11 +778,19 @@ fn complete_registration(ip: String) -> Result<(), String> {
 #[tauri::command]
 fn logout() -> Result<(), String> {
     let mut settings = load_settings();
-    // Wipe identity data
     settings.private_key = String::new();
     settings.public_key = String::new();
     settings.device_ip = String::new();
+    settings.remember_me = false; // Reset this too
     save_settings(&settings);
+    
+    // Force disconnect VPN on logout for safety
+    // (Optional, but good for security)
+    let _ = Command::new("taskkill")
+        .args(&["/F", "/IM", "wireguard.exe"]) 
+        .creation_flags(0x08000000)
+        .output();
+        
     Ok(())
 }
 
@@ -828,32 +839,26 @@ async fn login_account(email: String, password: String, public_key: String) -> R
 // --- Main ---
 
 fn main() {
-    // 0. Safety Cleanup (Pre-Init)
+    // 0. Safety Cleanup
     force_disconnect_all();
 
-    // let system_tray = build_tray();
+    // 1. Load Settings
+    let mut settings = load_settings();
 
-    // 1. Load Settings (Authoritative)
-    let settings = load_settings();
+    // --- NEW: Handle "Don't Remember Me" ---
+    if !settings.remember_me {
+        // If user didn't want to be remembered, wipe identity on launch
+        settings.private_key = String::new();
+        settings.public_key = String::new();
+        settings.device_ip = String::new();
+        // Keep the 'remember_me' flag false, but clear data
+        save_settings(&settings);
+    }
+    // ----------------------------------------
+
     let ks_enabled = settings.kill_switch_enabled;
 
-    // 2. Startup Logic
-    if ks_enabled {
-        // Recovery Mode
-        if let Err(e) = enable_kill_switch_internal() {
-            append_log(&format!(
-                "CRITICAL: Failed to apply kills switch on startup: {e}"
-            ))
-            .ok();
-        } else {
-            append_log("Startup: Kill Switch rules APPLIED. Internet blocked.").ok();
-        }
-    } else {
-        // Safety Clean
-        let _ = disable_kill_switch_internal();
-    }
-
-    // ... (rest of main)
+    // ... rest of main ...
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
