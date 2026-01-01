@@ -212,6 +212,13 @@ struct AddPeerResponse {
     // server might return other fields, we just need allowed_ip
 }
 
+#[derive(Serialize)]
+struct RegisterRequest {
+    email: String,
+    password: String,
+    public_key: String,
+}
+
 // --- Internal Logic Functions ---
 
 fn force_disconnect_all() {
@@ -309,7 +316,7 @@ fn enable_kill_switch_internal() -> Result<(), String> {
             "name=NeraVPN_KS_AllowTunnel",
             "dir=out",
             "action=allow",
-            "interface=nera",
+            "interface=nera-temp",
             "enable=yes",
         ])
         .output()
@@ -765,6 +772,59 @@ fn complete_registration(ip: String) -> Result<(), String> {
     Ok(())
 }
 
+#[tauri::command]
+fn logout() -> Result<(), String> {
+    let mut settings = load_settings();
+    // Wipe identity data
+    settings.private_key = String::new();
+    settings.public_key = String::new();
+    settings.device_ip = String::new();
+    save_settings(&settings);
+    Ok(())
+}
+
+#[tauri::command]
+async fn register_account(email: String, password: String, public_key: String) -> Result<String, String> {
+    let client = reqwest::Client::new();
+    let payload = RegisterRequest { email, password, public_key };
+    
+    // Call the Tokyo Node.js Server directly
+    let res = client.post("http://45.76.106.63:3000/api/register")
+        .json(&payload)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+        
+    if !res.status().is_success() {
+        return Err(format!("Server error: {}", res.status()));
+    }
+
+    let text = res.text().await.map_err(|e| e.to_string())?;
+    Ok(text)
+}
+
+#[tauri::command]
+async fn login_account(email: String, password: String, public_key: String) -> Result<String, String> {
+    let client = reqwest::Client::new();
+    let payload = RegisterRequest { email, password, public_key }; // Reusing the struct is fine
+
+    // Hit the new /api/login endpoint
+    let res = client.post("http://45.76.106.63:3000/api/login")
+        .json(&payload)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    if !res.status().is_success() {
+         // Try to parse the error message from JSON
+         let error_text = res.text().await.unwrap_or_else(|_| "Unknown login error".into());
+         return Err(error_text);
+    }
+
+    let text = res.text().await.map_err(|e| e.to_string())?;
+    Ok(text)
+}
+
 // --- Main ---
 
 fn main() {
@@ -819,6 +879,9 @@ fn main() {
             register_user_key,
             get_user_status,
             complete_registration,
+            register_account,
+            login_account,
+            logout,
         ])
         .setup(move |app| {
             // Apply Tray State based on persistence

@@ -15,6 +15,7 @@
   import { listen } from "@tauri-apps/api/event";
   import Protection from "./components/Protection.svelte"; // Ensure correct path
   import SignUp from "./components/SignUp.svelte";
+  import { userState, syncAuthState } from "./lib/stores.js"; // Import the Truth Vault
   import Globe from "./lib/Globe.svelte"; // Import Globe component
   import { getPublicIPAndLocation } from "./lib/ipLocation";
   const appWindow = getCurrentWebviewWindow();
@@ -71,7 +72,9 @@
   let regStep = 0; // 0: Idle, 1: Generating/Registering, 2: Success, 3: Error
   let regError = "";
   let regSuccessMsg = "";
-  let userPublicKey = "";
+
+  // let userPublicKey = ""; // REMOVED: Managed by Store
+  // let loadingAuth = true; // REMOVED: Managed by Store
 
   // About Modal State
   let showAboutModal = false;
@@ -290,6 +293,18 @@
     }
   }
 
+  async function handleLogout() {
+    try {
+      await invoke("logout");
+      await syncAuthState(); // Update the Vault
+      // userPublicKey = ""; // Clear state to trigger "Guest Mode"
+      showRegistrationModal = false; // Reset any modals
+      console.log("Logged out successfully");
+    } catch (e) {
+      console.error("Logout failed", e);
+    }
+  }
+
   async function handleImportConfig() {
     // Import logic currently depends on invoke.
     // Protection component handles "protection". Config import is borderline.
@@ -319,35 +334,31 @@
     try {
       const key = await invoke("get_user_status");
       if (!key) {
-        // No key found, start registration
-        startRegistration();
+        // No key found, remain in Guest state
+        // startRegistration(); // <-- REMOVED auto-trigger
       } else {
         console.log("User key found:", key);
         userPublicKey = key;
       }
     } catch (e) {
       console.error("Failed to check user status", e);
+    } finally {
+      loadingAuth = false;
     }
   }
 
   async function startRegistration() {
-    showRegistrationModal = true;
-    regStep = 1;
-    regError = "";
+    // This is now only called by "Regenerate Key" button
+    // which effectively resets us to guest mode for a moment, then back
+    userPublicKey = "";
+    await checkUserKey(); // re-check implies guest if cleared?
+    // Wait, prompt says: "Regenerate Key" button... can just reset userPublicKey = ""
+    // But we need to generate NEW keys.
+    // Let's keep the logic but adapt it.
 
-    try {
-      // Delay for UX (so user sees "Generating...")
-      await new Promise((r) => setTimeout(r, 800));
-
-      const msg = await invoke("register_user_key");
-      regSuccessMsg = msg;
-      userPublicKey = await invoke("get_user_status");
-      regStep = 2;
-    } catch (e) {
-      console.error("Registration failed", e);
-      regError = String(e);
-      regStep = 3;
-    }
+    // Actually, prompt says: "can just reset userPublicKey = "" to trigger the Guest State again"
+    // So let's do EXACTLY that.
+    userPublicKey = "";
   }
 
   function closeRegModal() {
@@ -417,8 +428,24 @@
   }
 
   onMount(async () => {
-    // 1. Check for User Keys FIRST
-    await checkUserKey();
+    // 1. Check for User Keys (Strict Truth Vault Check)
+    await syncAuthState();
+
+    // Auto-generate key for new guests so they can register
+    // Note: $userState access in script might be tricky if not reactive,
+    // but we can rely on the sync waiting.
+    // If status is GUEST and publicKey is null, we generate.
+    // We need to subscribe or just check the store value.
+    // simpler: check the result of invoke again or trust the sync.
+    // Let's invoke check:
+    const status = await invoke("get_user_status");
+    if (!status) {
+      console.log("Guest with no key. Generating...");
+      await invoke("register_user_key");
+      await syncAuthState();
+    }
+
+    // await checkUserKey(); // REPLACED
 
     loadSettings();
 
@@ -467,326 +494,331 @@
     <div class="glow glow-bottom"></div>
   </div>
 
-  <!-- HUD Layout -->
+  {#if $userState.status === "LOADING"}
+    <!-- State 1: Loading -->
+    <div class="auth-loading">
+      <div class="spinner"></div>
+      <p>Verifying Identity...</p>
+    </div>
+  {:else if $userState.status === "AUTHENTICATED"}
+    <!-- State 2: Authenticated (Show Dashboard) -->
+    <!-- HUD Layout -->
 
-  <!-- Top Left: IP & Location -->
-  <div class="hud-panel top-left">
-    <div class="brand-row">
-      <div class="brand-text">
-        <p class="brand-status">
-          <span class={`status-dot ${connected ? "on" : "off"}`}></span>
-          {connected ? "Connected securely" : "Inactive"}
-        </p>
+    <!-- Top Left: IP & Location -->
+    <div class="hud-panel top-left">
+      <div class="brand-row">
+        <div class="brand-text">
+          <p class="brand-status">
+            <span class={`status-dot ${connected ? "on" : "off"}`}></span>
+            {connected ? "Connected securely" : "Inactive"}
+          </p>
+        </div>
       </div>
     </div>
-  </div>
-  <div class="hud-panel bottom-right">
-    <div class="ip-display">
-      <div class="ip-row">
-        <span class="ip-label">CURRENT IP</span>
-        <span class="ip-value"
-          >{ipData ? ipData.ip : ipChecking ? "Checking..." : "---"}</span
-        >
-      </div>
-      {#if showLocation && ipData && ipData.country}
-        <div class="ip-row location-row">
-          <span class="location-icon">📍</span>
-          <span class="location-value"
-            >{ipData.city ? `${ipData.city}, ` : ""}{ipData.country}</span
+    <div class="hud-panel bottom-right">
+      <div class="ip-display">
+        <div class="ip-row">
+          <span class="ip-label">CURRENT IP</span>
+          <span class="ip-value"
+            >{ipData ? ipData.ip : ipChecking ? "Checking..." : "---"}</span
           >
         </div>
-      {/if}
-      {#if ipError}
-        <div class="ip-error">OFFLINE</div>
-      {/if}
-    </div>
-  </div>
-
-  <!-- Copyright Footer REMOVED (Moved to About) -->
-
-  <!-- Top Right Routes: Location Selector -->
-  <div class="hud-panel top-right-routes">
-    <div class="panel-header">
-      <svg
-        xmlns="http://www.w3.org/2000/svg"
-        fill="none"
-        viewBox="0 0 24 24"
-        stroke-width="1.5"
-        stroke="currentColor"
-        class="header-icon"
-      >
-        <path
-          stroke-linecap="round"
-          stroke-linejoin="round"
-          d="M12 21a9.004 9.004 0 008.716-6.747M12 21a9.004 9.004 0 01-8.716-6.747M12 21c2.485 0 4.5-4.03 4.5-9S14.485 3 12 3m0 18c-2.485 0-4.5-4.03-4.5-9S9.515 3 12 3m0 0a8.997 8.997 0 017.843 4.582M12 3a8.997 8.997 0 00-7.843 4.582m15.686 0A11.953 11.953 0 0112 10.5c-2.998 0-5.74-1.1-7.843-2.918m15.686 0A8.959 8.959 0 0121 12c0 .778-.099 1.533-.284 2.253m0 0A17.919 17.919 0 0112 16.5c-3.162 0-6.133-.815-8.716-2.247m0 0A9.015 9.015 0 013 12c0-1.605.546-3.1 1.487-4.305"
-        />
-      </svg>
-      <span class="header-title">Locations</span>
-    </div>
-
-    <!-- Collapsed Header is Icon Only via CSS -->
-
-    <!-- Route Content -->
-    <div class="route-content">
-      <div class="route-list">
-        {#each ROUTES as route}
-          <button class="route-item" on:click={() => selectRoute(route.key)}>
-            <span
-              class={`route-dot ${route.key === selectedRouteKey ? "active" : ""}`}
-            ></span>
-            <span class="route-label">{route.label}</span>
-            {#if route.key === selectedRouteKey}
-              <span class="check">✓</span>
-            {/if}
-          </button>
-        {/each}
-      </div>
-    </div>
-  </div>
-
-  <!-- Top Right: Config & Controls -->
-  <div class="hud-panel top-right">
-    <div class="panel-header">
-      <svg
-        xmlns="http://www.w3.org/2000/svg"
-        fill="none"
-        viewBox="0 0 24 24"
-        stroke-width="1.5"
-        stroke="currentColor"
-        class="header-icon"
-      >
-        <path
-          stroke-linecap="round"
-          stroke-linejoin="round"
-          d="M10.5 6h9.75M10.5 6a1.5 1.5 0 11-3 0m3 0a1.5 1.5 0 10-3 0M3.75 6H7.5m3 12h9.75m-9.75 0a1.5 1.5 0 01-3 0m3 0a1.5 1.5 0 00-3 0m-3.75 0H7.5m9-6h3.75m-3.75 0a1.5 1.5 0 01-3 0m3 0a1.5 1.5 0 00-3 0m-9.75 0h9.75"
-        />
-      </svg>
-      <span class="header-title">Session Controls</span>
-    </div>
-    <div class="options-list">
-      <!-- Kill Switch -->
-      <label class="control-row">
-        <span>Kill Switch</span>
-        <div class="toggle-wrap">
-          <input
-            type="checkbox"
-            checked={killswitch}
-            on:change={(e) => protection.setKillSwitch(e.currentTarget.checked)}
-          />
-          <span class="toggle-track"><span class="toggle-thumb"></span></span>
-        </div>
-      </label>
-
-      <!-- Auto-Connect -->
-      <label class="control-row">
-        <span>Auto-Connect</span>
-        <div class="toggle-wrap">
-          <input
-            type="checkbox"
-            bind:checked={autoConnectWifi}
-            on:change={saveSettings}
-          />
-          <span class="toggle-track"><span class="toggle-thumb"></span></span>
-        </div>
-      </label>
-
-      <!-- Show Location -->
-      <label class="control-row">
-        <span>Show Location</span>
-        <div class="toggle-wrap">
-          <input
-            type="checkbox"
-            bind:checked={showLocation}
-            on:change={saveSettings}
-          />
-          <span class="toggle-track"><span class="toggle-thumb"></span></span>
-        </div>
-      </label>
-
-      <!-- Start Minimized -->
-      <label class="control-row">
-        <span>Start Minimized</span>
-        <div class="toggle-wrap">
-          <input
-            type="checkbox"
-            bind:checked={startMinimized}
-            on:change={saveSettings}
-          />
-          <span class="toggle-track"><span class="toggle-thumb"></span></span>
-        </div>
-      </label>
-
-      <!-- Launch on Startup -->
-      <label class="control-row">
-        <span>Launch on Startup</span>
-        <div class="toggle-wrap">
-          <input
-            type="checkbox"
-            bind:checked={launchOnStartup}
-            on:change={saveSettings}
-          />
-          <span class="toggle-track"><span class="toggle-thumb"></span></span>
-        </div>
-      </label>
-
-      <!-- Theme Switcher -->
-      <label class="control-row">
-        <span>Theme</span>
-        <div class="select-wrap">
-          <select
-            bind:value={currentTheme}
-            on:change={saveSettings}
-            class="theme-select"
-          >
-            <option value="light">Light</option>
-            <option value="dark">Dark</option>
-            <option value="space">Space</option>
-          </select>
-        </div>
-      </label>
-    </div>
-
-    <div class="divider"></div>
-
-    <button class="action-btn import-btn" on:click={doImport} disabled={isBusy}>
-      Import Config
-    </button>
-    {#if importMessage}
-      <p class="status-msg">{importMessage}</p>
-    {/if}
-
-    <div class="divider"></div>
-    <button
-      class="action-btn text-btn"
-      on:click={startRegistration}
-      disabled={isBusy || connected}
-    >
-      Regenerate Key
-    </button>
-
-    <div class="divider"></div>
-    <button
-      class="action-btn text-btn"
-      on:click={() => (showAboutModal = true)}
-    >
-      About
-    </button>
-  </div>
-
-  <!-- Top Center: Main Action & Status -->
-  <div class="hud-panel top-center">
-    <!-- Connect Ring -->
-    <div class="ring-wrap">
-      <div class={`ring-outer ${connected ? "on" : ""}`}>
-        <div class="ring-inner">
-          <button
-            class={`ring-button ${connected ? "on" : ""}`}
-            on:click={toggle}
-            disabled={isBusy}
-          >
-          </button>
-        </div>
-      </div>
-    </div>
-  </div>
-
-  <!-- Bottom Left: Stats & Graph -->
-  <div class="hud-panel bottom-left">
-    <div class="panel-header">Traffic</div>
-    <div class="stats-grid">
-      <div class="stat-item">
-        <span class="label">DL</span>
-        <span class="val">{connected ? downloadSpeed : "—"}</span>
-      </div>
-      <div class="stat-item">
-        <span class="label">UL</span>
-        <span class="val">{connected ? uploadSpeed : "—"}</span>
-      </div>
-      <div class="stat-item">
-        <span class="label">Ping</span>
-        <span class="val">{connected ? pingValue : "—"}</span>
-      </div>
-    </div>
-  </div>
-
-  <!-- Bottom Center: Graph -->
-  <div class="hud-panel bottom-center-graph">
-    <div class="traffic-graph">
-      <div class="cyber-grid"></div>
-
-      <!-- Peak Label (hover) -->
-      <div class="peak-label">Peak: {peakSpeed}</div>
-
-      <svg viewBox="0 0 100 100" preserveAspectRatio="none" class="traffic-svg">
-        <defs>
-          <linearGradient id="trafficGradient" x1="0" x2="0" y1="0" y2="1">
-            <stop offset="0%" stop-color="#22c55e" stop-opacity="0.5" />
-            <stop offset="100%" stop-color="#22c55e" stop-opacity="0" />
-          </linearGradient>
-        </defs>
-
-        <!-- Fill Area -->
-        <path
-          d="{trafficPath} L 100,100 L 0,100 Z"
-          fill="url(#trafficGradient)"
-          class="traffic-fill"
-        />
-
-        <!-- Stroke Line -->
-        <path
-          d={trafficPath}
-          fill="none"
-          stroke="#22c55e"
-          stroke-width="2"
-          vector-effect="non-scaling-stroke"
-          stroke-linecap="round"
-          stroke-linejoin="round"
-          class="traffic-line"
-        />
-      </svg>
-    </div>
-  </div>
-
-  <Protection
-    bind:this={protection}
-    bind:vpnConnected={connected}
-    bind:killSwitchEnabled={killswitch}
-    bind:recoveryMode={recovery}
-    bind:error={vpnError}
-    autoConnect={autoConnectWifi}
-  />
-
-  {#if recovery}
-    <div class="ks-banner">⚠️ Kill Switch Active</div>
-  {/if}
-  {#if vpnError}
-    <div class="error-toast">{vpnError}</div>
-  {/if}
-
-  {#if showRegistrationModal}
-    <div class="modal-backdrop">
-      <div class="modal">
-        <h3>Secure Setup</h3>
-        {#if regStep === 1}
-          <div class="spinner"></div>
-          <p>Generating unique encryption keys...</p>
-          <p class="sub-text">Registering with secure network...</p>
-        {:else if regStep === 2}
-          <SignUp
-            publicKey={userPublicKey}
-            onSignupSuccess={() => {
-              showRegistrationModal = false;
-              regStep = 0;
-            }}
-          />
-        {:else if regStep === 3}
-          <div class="icon-error">✕</div>
-          <p>Registration Failed</p>
-          <p class="error-msg">{regError}</p>
-          <button class="retry-btn" on:click={startRegistration}>Retry</button>
-          <button class="text-btn" on:click={closeRegModal}>Close</button>
+        {#if showLocation && ipData && ipData.country}
+          <div class="ip-row location-row">
+            <span class="location-icon">📍</span>
+            <span class="location-value"
+              >{ipData.city ? `${ipData.city}, ` : ""}{ipData.country}</span
+            >
+          </div>
+        {/if}
+        {#if ipError}
+          <div class="ip-error">OFFLINE</div>
         {/if}
       </div>
+    </div>
+
+    <!-- Copyright Footer REMOVED (Moved to About) -->
+
+    <!-- Top Right Routes: Location Selector -->
+    <div class="hud-panel top-right-routes">
+      <div class="panel-header">
+        <svg
+          xmlns="http://www.w3.org/2000/svg"
+          fill="none"
+          viewBox="0 0 24 24"
+          stroke-width="1.5"
+          stroke="currentColor"
+          class="header-icon"
+        >
+          <path
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            d="M12 21a9.004 9.004 0 008.716-6.747M12 21a9.004 9.004 0 01-8.716-6.747M12 21c2.485 0 4.5-4.03 4.5-9S14.485 3 12 3m0 18c-2.485 0-4.5-4.03-4.5-9S9.515 3 12 3m0 0a8.997 8.997 0 017.843 4.582M12 3a8.997 8.997 0 00-7.843 4.582m15.686 0A11.953 11.953 0 0112 10.5c-2.998 0-5.74-1.1-7.843-2.918m15.686 0A8.959 8.959 0 0121 12c0 .778-.099 1.533-.284 2.253m0 0A17.919 17.919 0 0112 16.5c-3.162 0-6.133-.815-8.716-2.247m0 0A9.015 9.015 0 013 12c0-1.605.546-3.1 1.487-4.305"
+          />
+        </svg>
+        <span class="header-title">Locations</span>
+      </div>
+
+      <!-- Collapsed Header is Icon Only via CSS -->
+
+      <!-- Route Content -->
+      <div class="route-content">
+        <div class="route-list">
+          {#each ROUTES as route}
+            <button class="route-item" on:click={() => selectRoute(route.key)}>
+              <span
+                class={`route-dot ${route.key === selectedRouteKey ? "active" : ""}`}
+              ></span>
+              <span class="route-label">{route.label}</span>
+              {#if route.key === selectedRouteKey}
+                <span class="check">✓</span>
+              {/if}
+            </button>
+          {/each}
+        </div>
+      </div>
+    </div>
+
+    <!-- Top Right: Config & Controls -->
+    <div class="hud-panel top-right">
+      <div class="panel-header">
+        <svg
+          xmlns="http://www.w3.org/2000/svg"
+          fill="none"
+          viewBox="0 0 24 24"
+          stroke-width="1.5"
+          stroke="currentColor"
+          class="header-icon"
+        >
+          <path
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            d="M10.5 6h9.75M10.5 6a1.5 1.5 0 11-3 0m3 0a1.5 1.5 0 10-3 0M3.75 6H7.5m3 12h9.75m-9.75 0a1.5 1.5 0 01-3 0m3 0a1.5 1.5 0 00-3 0m-3.75 0H7.5m9-6h3.75m-3.75 0a1.5 1.5 0 01-3 0m3 0a1.5 1.5 0 00-3 0m-9.75 0h9.75"
+          />
+        </svg>
+        <span class="header-title">Session Controls</span>
+      </div>
+      <div class="options-list">
+        <!-- Kill Switch -->
+        <label class="control-row">
+          <span>Kill Switch</span>
+          <div class="toggle-wrap">
+            <input
+              type="checkbox"
+              checked={killswitch}
+              on:change={(e) =>
+                protection.setKillSwitch(e.currentTarget.checked)}
+            />
+            <span class="toggle-track"><span class="toggle-thumb"></span></span>
+          </div>
+        </label>
+
+        <!-- Auto-Connect -->
+        <label class="control-row">
+          <span>Auto-Connect</span>
+          <div class="toggle-wrap">
+            <input
+              type="checkbox"
+              bind:checked={autoConnectWifi}
+              on:change={saveSettings}
+            />
+            <span class="toggle-track"><span class="toggle-thumb"></span></span>
+          </div>
+        </label>
+
+        <!-- Show Location -->
+        <label class="control-row">
+          <span>Show Location</span>
+          <div class="toggle-wrap">
+            <input
+              type="checkbox"
+              bind:checked={showLocation}
+              on:change={saveSettings}
+            />
+            <span class="toggle-track"><span class="toggle-thumb"></span></span>
+          </div>
+        </label>
+
+        <!-- Start Minimized -->
+        <label class="control-row">
+          <span>Start Minimized</span>
+          <div class="toggle-wrap">
+            <input
+              type="checkbox"
+              bind:checked={startMinimized}
+              on:change={saveSettings}
+            />
+            <span class="toggle-track"><span class="toggle-thumb"></span></span>
+          </div>
+        </label>
+
+        <!-- Launch on Startup -->
+        <label class="control-row">
+          <span>Launch on Startup</span>
+          <div class="toggle-wrap">
+            <input
+              type="checkbox"
+              bind:checked={launchOnStartup}
+              on:change={saveSettings}
+            />
+            <span class="toggle-track"><span class="toggle-thumb"></span></span>
+          </div>
+        </label>
+
+        <!-- Theme Switcher -->
+        <label class="control-row">
+          <span>Theme</span>
+          <div class="select-wrap">
+            <select
+              bind:value={currentTheme}
+              on:change={saveSettings}
+              class="theme-select"
+            >
+              <option value="light">Light</option>
+              <option value="dark">Dark</option>
+              <option value="space">Space</option>
+            </select>
+          </div>
+        </label>
+      </div>
+
+      <div class="divider"></div>
+
+      <button class="action-btn text-btn" on:click={handleLogout}>
+        Sign Out
+      </button>
+
+      <div class="divider"></div>
+
+      <button
+        class="action-btn import-btn"
+        on:click={doImport}
+        disabled={isBusy}
+      >
+        Import Config
+      </button>
+      {#if importMessage}
+        <p class="status-msg">{importMessage}</p>
+      {/if}
+
+      <div class="divider"></div>
+      <button
+        class="action-btn text-btn"
+        on:click={startRegistration}
+        disabled={isBusy || connected}
+      >
+        Regenerate Key
+      </button>
+
+      <div class="divider"></div>
+      <button
+        class="action-btn text-btn"
+        on:click={() => (showAboutModal = true)}
+      >
+        About
+      </button>
+    </div>
+
+    <!-- Top Center: Main Action & Status -->
+    <div class="hud-panel top-center">
+      <!-- Connect Ring -->
+      <div class="ring-wrap">
+        <div class={`ring-outer ${connected ? "on" : ""}`}>
+          <div class="ring-inner">
+            <button
+              class={`ring-button ${connected ? "on" : ""}`}
+              on:click={toggle}
+              disabled={isBusy}
+            >
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Bottom Left: Stats & Graph -->
+    <div class="hud-panel bottom-left">
+      <div class="panel-header">Traffic</div>
+      <div class="stats-grid">
+        <div class="stat-item">
+          <span class="label">DL</span>
+          <span class="val">{connected ? downloadSpeed : "—"}</span>
+        </div>
+        <div class="stat-item">
+          <span class="label">UL</span>
+          <span class="val">{connected ? uploadSpeed : "—"}</span>
+        </div>
+        <div class="stat-item">
+          <span class="label">Ping</span>
+          <span class="val">{connected ? pingValue : "—"}</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Bottom Center: Graph -->
+    <div class="hud-panel bottom-center-graph">
+      <div class="traffic-graph">
+        <div class="cyber-grid"></div>
+
+        <!-- Peak Label (hover) -->
+        <div class="peak-label">Peak: {peakSpeed}</div>
+
+        <svg
+          viewBox="0 0 100 100"
+          preserveAspectRatio="none"
+          class="traffic-svg"
+        >
+          <defs>
+            <linearGradient id="trafficGradient" x1="0" x2="0" y1="0" y2="1">
+              <stop offset="0%" stop-color="#22c55e" stop-opacity="0.5" />
+              <stop offset="100%" stop-color="#22c55e" stop-opacity="0" />
+            </linearGradient>
+          </defs>
+
+          <!-- Fill Area -->
+          <path
+            d="{trafficPath} L 100,100 L 0,100 Z"
+            fill="url(#trafficGradient)"
+            class="traffic-fill"
+          />
+
+          <!-- Stroke Line -->
+          <path
+            d={trafficPath}
+            fill="none"
+            stroke="#22c55e"
+            stroke-width="2"
+            vector-effect="non-scaling-stroke"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            class="traffic-line"
+          />
+        </svg>
+      </div>
+    </div>
+
+    <!-- Logic Only: Protection Component (Hidden UI) -->
+    <div style="display: none;">
+      <Protection
+        bind:this={protection}
+        bind:vpnConnected={connected}
+        bind:killSwitchEnabled={killswitch}
+        bind:recoveryMode={recovery}
+        bind:error={vpnError}
+        autoConnect={autoConnectWifi}
+      />
+    </div>
+
+    {#if recovery}
+      <div class="ks-banner">⚠️ Kill Switch Active</div>
+    {/if}
+    {#if vpnError}
+      <div class="error-toast">{vpnError}</div>
+    {/if}
+  {:else}
+    <!-- State 3: Guest (Show SignUp) -->
+    <div class="guest-container">
+      <SignUp publicKey={$userState.publicKey} />
     </div>
   {/if}
 
@@ -814,6 +846,44 @@
 </main>
 
 <style>
+  /* Auth Loading Screen */
+  .auth-loading {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    height: 100vh;
+    color: white;
+  }
+  .spinner {
+    border: 3px solid rgba(255, 255, 255, 0.1);
+    border-top: 3px solid #22c55e;
+    border-radius: 50%;
+    width: 30px;
+    height: 30px;
+    animation: spin 1s linear infinite;
+    margin-bottom: 1rem;
+  }
+  @keyframes spin {
+    0% {
+      transform: rotate(0deg);
+    }
+    100% {
+      transform: rotate(360deg);
+    }
+  }
+
+  /* Guest Container */
+  .guest-container {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    height: 100vh;
+    width: 100%;
+    backdrop-filter: blur(5px);
+  }
+
+  /* ... rest of existing styles ... */
   :global(body) {
     margin: 0;
     padding: 0;

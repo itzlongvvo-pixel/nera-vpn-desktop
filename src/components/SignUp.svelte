@@ -1,174 +1,244 @@
 <script>
-    import { registerUser } from "../api.js";
+    import { registerUser, loginUser } from "../api.js";
+    import { invoke } from "@tauri-apps/api/core";
+    import { syncAuthState } from "../lib/stores.js";
 
-    // We receive the user's public key from the main App
     export let publicKey = "";
-    // Function to call when registration succeeds (to close the modal or switch views)
     export let onSignupSuccess;
 
+    let mode = "login"; // 'register' or 'login'
     let email = "";
     let password = "";
     let confirmPassword = "";
+    let rememberMe = true;
+
     let isLoading = false;
     let errorMessage = "";
     let successMessage = "";
 
-    async function handleRegister() {
+    async function handleSubmit() {
         errorMessage = "";
         successMessage = "";
 
-        // 1. Basic Validation
         if (!email || !password) {
             errorMessage = "Please fill in all fields.";
             return;
         }
-        if (password !== confirmPassword) {
+
+        if (mode === "register" && password !== confirmPassword) {
             errorMessage = "Passwords do not match.";
             return;
         }
-        if (!publicKey) {
-            errorMessage =
-                "Error: Public Key not found. Please regenerate your key.";
-            return;
-        }
 
-        // 2. Send to Tokyo Server
         isLoading = true;
         try {
-            const result = await registerUser(email, password, publicKey);
+            let result;
+            if (mode === "login") {
+                result = await loginUser(email, password, publicKey);
+                successMessage = `Welcome back! IP: ${result.ip}`;
+            } else {
+                result = await registerUser(email, password, publicKey);
+                successMessage = `Account created! IP: ${result.ip}`;
+            }
 
-            // 3. Success!
-            successMessage = `Account created! Your IP: ${result.ip}`;
-            // Wait 1.5 seconds then notify the parent app
-            setTimeout(() => {
-                if (onSignupSuccess) onSignupSuccess();
-            }, 1500);
+            // --- THE CRITICAL FIX ---
+            // We do NOT manually change screens.
+            // We tell the Security Vault to re-verify the user.
+            await syncAuthState();
+            // ------------------------
         } catch (err) {
-            errorMessage = err.message || "Registration failed. Try again.";
+            let msg = err.message || "Operation failed";
+            if (msg.includes("UNIQUE constraint")) {
+                errorMessage = "Account exists. Try logging in.";
+            } else {
+                errorMessage = msg;
+            }
         } finally {
             isLoading = false;
         }
     }
 </script>
 
-<div class="signup-container">
-    <h2>Create Account</h2>
+<div class="auth-container">
+    <div class="tabs">
+        <button
+            class:active={mode === "login"}
+            on:click={() => (mode = "login")}>Sign In</button
+        >
+        <button
+            class:active={mode === "register"}
+            on:click={() => (mode = "register")}>Create Account</button
+        >
+    </div>
 
-    {#if errorMessage}
-        <div class="error">{errorMessage}</div>
-    {/if}
+    <div class="form-content">
+        {#if errorMessage}
+            <div class="error">{errorMessage}</div>
+        {/if}
+        {#if successMessage}
+            <div class="success">{successMessage}</div>
+        {/if}
 
-    {#if successMessage}
-        <div class="success">{successMessage}</div>
-    {:else}
-        <div class="input-group">
-            <label for="email">Email</label>
-            <input
-                type="email"
-                id="email"
-                bind:value={email}
-                placeholder="you@example.com"
-            />
-        </div>
-
-        <div class="input-group">
-            <label for="pass">Password</label>
-            <input
-                type="password"
-                id="pass"
-                bind:value={password}
-                placeholder="••••••••"
-            />
-        </div>
-
-        <div class="input-group">
-            <label for="confirm">Confirm Password</label>
-            <input
-                type="password"
-                id="confirm"
-                bind:value={confirmPassword}
-                placeholder="••••••••"
-            />
-        </div>
-
-        <button on:click={handleRegister} disabled={isLoading}>
-            {#if isLoading}
-                Creating Account...
-            {:else}
-                Sign Up
+        {#if !successMessage}
+            <div class="input-group">
+                <input type="email" bind:value={email} placeholder="Email" />
+            </div>
+            <div class="input-group">
+                <input
+                    type="password"
+                    bind:value={password}
+                    placeholder="Password"
+                />
+            </div>
+            {#if mode === "register"}
+                <div class="input-group">
+                    <input
+                        type="password"
+                        bind:value={confirmPassword}
+                        placeholder="Confirm Password"
+                    />
+                </div>
             {/if}
-        </button>
-    {/if}
+
+            <div class="options-row">
+                <label class="remember-me">
+                    <input type="checkbox" bind:checked={rememberMe} />
+                    <span>Remember me</span>
+                </label>
+                {#if mode === "login"}
+                    <a href="#" class="forgot-pass">Forgot Password?</a>
+                {/if}
+            </div>
+
+            <button
+                class="submit-btn"
+                on:click={handleSubmit}
+                disabled={isLoading}
+            >
+                {#if isLoading}
+                    <div class="spinner-sm"></div>
+                    Processing...
+                {:else}
+                    {mode === "register" ? "Sign Up" : "Sign In"}
+                {/if}
+            </button>
+        {/if}
+    </div>
 </div>
 
 <style>
-    .signup-container {
-        background: #1a1a1a;
-        padding: 2rem;
-        border-radius: 12px;
+    .auth-container {
+        background: rgba(15, 23, 42, 0.6);
+        backdrop-filter: blur(20px);
+        border: 1px solid rgba(255, 255, 255, 0.1);
+        border-radius: 16px;
         width: 100%;
-        max-width: 400px;
+        max-width: 380px;
         margin: 0 auto;
-        color: white;
-        box-shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
+        overflow: hidden;
+        box-shadow: 0 20px 40px rgba(0, 0, 0, 0.4);
     }
-    h2 {
-        margin-top: 0;
-        text-align: center;
+    .tabs {
+        display: flex;
+        background: rgba(0, 0, 0, 0.2);
+        border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+    }
+    .tabs button {
+        flex: 1;
+        padding: 1rem;
+        background: transparent;
+        border: none;
+        color: #94a3b8;
+        cursor: pointer;
+        font-weight: 600;
+        transition: all 0.2s;
+        border-bottom: 2px solid transparent;
+    }
+    .tabs button.active {
+        color: #fff;
+        border-bottom-color: #22d3ee;
+        background: rgba(255, 255, 255, 0.02);
+    }
+    .form-content {
+        padding: 2rem;
     }
     .input-group {
         margin-bottom: 1rem;
-        text-align: left;
-    }
-    label {
-        display: block;
-        font-size: 0.9rem;
-        margin-bottom: 0.5rem;
-        color: #aaa;
     }
     input {
         width: 100%;
-        padding: 0.8rem;
-        border-radius: 6px;
-        border: 1px solid #333;
-        background: #2a2a2a;
+        padding: 0.8rem 0;
+        background: transparent;
+        border: none;
+        border-bottom: 1px solid #334155;
         color: white;
-        box-sizing: border-box;
+        font-size: 1rem;
+        outline: none;
+        transition: border-color 0.3s;
     }
     input:focus {
-        border-color: #4caf50;
-        outline: none;
+        border-bottom-color: #22d3ee;
     }
-    button {
-        width: 100%;
-        padding: 1rem;
-        background: #4caf50;
-        color: white;
-        border: none;
-        border-radius: 6px;
+    .options-row {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        font-size: 0.8rem;
+        color: #94a3b8;
+        margin-bottom: 1.5rem;
+    }
+    .remember-me {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
         cursor: pointer;
-        font-weight: bold;
-        font-size: 1rem;
-        margin-top: 1rem;
     }
-    button:disabled {
-        background: #555;
+    .forgot-pass {
+        color: #22d3ee;
+        text-decoration: none;
+    }
+    .submit-btn {
+        width: 100%;
+        padding: 0.8rem;
+        border: none;
+        border-radius: 8px;
+        background: linear-gradient(135deg, #22d3ee 0%, #0ea5e9 100%);
+        color: #0f172a;
+        font-weight: 700;
+        cursor: pointer;
+    }
+    .submit-btn:disabled {
+        opacity: 0.7;
         cursor: not-allowed;
     }
     .error {
-        color: #ff6b6b;
-        background: rgba(255, 107, 107, 0.1);
+        color: #ef4444;
+        background: rgba(239, 68, 68, 0.1);
         padding: 0.8rem;
-        border-radius: 4px;
+        border-radius: 6px;
+        margin-bottom: 1rem;
+    }
+    .success {
+        color: #22c55e;
+        background: rgba(34, 197, 94, 0.1);
+        padding: 0.8rem;
+        border-radius: 6px;
         margin-bottom: 1rem;
         text-align: center;
     }
-    .success {
-        color: #4caf50;
-        background: rgba(76, 175, 80, 0.1);
-        padding: 0.8rem;
-        border-radius: 4px;
-        margin-bottom: 1rem;
-        text-align: center;
+    .spinner-sm {
+        display: inline-block;
+        width: 12px;
+        height: 12px;
+        border: 2px solid rgba(0, 0, 0, 0.3);
+        border-top-color: #000;
+        border-radius: 50%;
+        animation: spin 1s linear infinite;
+        margin-right: 5px;
+    }
+    @keyframes spin {
+        to {
+            transform: rotate(360deg);
+        }
     }
 </style>
